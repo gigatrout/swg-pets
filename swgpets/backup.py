@@ -31,7 +31,22 @@ ASSET_EXTENSIONS = {
     ".eot",
 }
 
-PAGE_PREFIXES = ("/pets", "/pet/", "/specials", "/special")
+PAGE_PREFIXES = ("/pets", "/pet/", "/creature/", "/specials", "/special", "/creatures")
+TOOL_PREFIXES = (
+    "/research",
+    "/planner",
+    "/spots",
+    "/lyase",
+    "/known",
+    "/sheet",
+    "/exp",
+    "/statcalc",
+    "/hydro",
+    "/oekevo",
+    "/family",
+    "/unknown",
+    "/about",
+)
 ASSET_PREFIXES = ("/templates/", "/images/")
 SPECIAL_PATHS = {"/favicon.ico", "/special", "/specials"}
 
@@ -41,10 +56,7 @@ SPECIAL_IDS = (
     "17", "18", "19", "20", "21", "22", "25", "26", "28", "29", "31", "32", "33",
 )
 
-REWRITE_HOSTS = re.compile(
-    rb"https?://(?:www\.)?swgpets\.com|//(?:www\.)?swgpets\.com",
-    re.IGNORECASE,
-)
+from swgpets.rewrite_urls import rewrite_mirror_body
 
 URL_IN_CSS = re.compile(r"url\(['\"]?([^'\"\)]+)['\"]?\)", re.IGNORECASE)
 
@@ -74,10 +86,9 @@ def in_scope(path: str) -> bool:
         return True
     if any(base.startswith(prefix) for prefix in PAGE_PREFIXES):
         return True
-    if any(base.startswith(prefix) for prefix in ASSET_PREFIXES):
+    if any(base.startswith(prefix) for prefix in TOOL_PREFIXES):
         return True
-    # Creature lists linked from special pages ("where to acquire").
-    if base.startswith("/creatures") and "specials=" in query:
+    if any(base.startswith(prefix) for prefix in ASSET_PREFIXES):
         return True
     return False
 
@@ -139,13 +150,8 @@ def mirror_dest(path_query: str, root: Path) -> Path:
 
 
 def rewrite_body(body: bytes) -> bytes:
-    """Strip absolute swgpets.com URLs so links work on the local server."""
-    if b"<" in body[:200] or b"text" in body[:50].lower():
-        return REWRITE_HOSTS.sub(b"", body)
-    lowered = body[:512].lower()
-    if b"url(" in lowered or b".css" in lowered:
-        return REWRITE_HOSTS.sub(b"", body)
-    return body
+    """Strip absolute swgpets.com and Wayback URLs so links work on the local server."""
+    return rewrite_mirror_body(body)
 
 
 def extract_links(html: str, base_path: str) -> set[str]:
@@ -185,10 +191,18 @@ def extract_css_urls(css: str, base_path: str) -> set[str]:
 def collect_asset_links(root: Path) -> set[str]:
     """Return site paths (/images/...) for assets referenced in mirrored HTML/CSS."""
     found: set[str] = set()
+    asset_attr = re.compile(
+        r"""(?:src|href|background)\s*=\s*['"](/(?:images|templates)/[^'"]+)['"]""",
+        re.IGNORECASE,
+    )
     for html_file in root.rglob("index.html"):
+        text = html_file.read_text(encoding="utf-8", errors="replace")
+        for match in asset_attr.finditer(text):
+            path_only = match.group(1).split("?", 1)[0]
+            if is_asset_path(path_only):
+                found.add(path_only)
         rel = html_file.relative_to(root)
         base_path = "/" + str(rel.parent).replace("\\", "/")
-        text = html_file.read_text(encoding="utf-8", errors="replace")
         for link in extract_links(text, base_path):
             path_only = link.split("?", 1)[0]
             if is_asset_path(path_only):
@@ -241,6 +255,42 @@ def download_missing_assets(
             print(f"[miss] {path}")
         time.sleep(delay)
     return saved, missed
+
+
+def fetch_mirror_page(
+    path_query: str,
+    root: Path,
+    *,
+    prefer: str = "auto",
+    live_timeout: int = 30,
+    wb_timeout: int = 120,
+    min_size: int = 500,
+) -> str | None:
+    """Download one HTML page into the mirror. Returns source name or None."""
+    path_only = path_query.split("?", 1)[0]
+    dest = mirror_dest(path_query, root)
+    if dest.is_file() and dest.stat().st_size >= min_size:
+        head = dest.read_bytes()[:512].lower()
+        if b"<html" in head or b"<!doctype" in head:
+            return "cached"
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    fetch_path = path_only + (
+        f"?{path_query.split('?', 1)[1]}" if "?" in path_query else ""
+    )
+    source = fetch_to_file(
+        fetch_path,
+        dest,
+        live_timeout=live_timeout,
+        wb_timeout=wb_timeout,
+        prefer=prefer,
+    )
+    if source and dest.is_file() and dest.stat().st_size >= min_size:
+        dest.write_bytes(rewrite_body(dest.read_bytes()))
+        return source
+    if dest.exists():
+        dest.unlink(missing_ok=True)
+    return None
 
 
 def seed_paths() -> list[str]:

@@ -9,10 +9,11 @@ from pathlib import Path
 
 from swgpets.config import UPSTREAM_BASE, USER_AGENT, WAYBACK_BASE
 
-WAYBACK_PREFIX = re.compile(
-    r"https?://web\.archive\.org/web/\d+(?:id_)?/",
-    re.IGNORECASE,
-)
+from swgpets.rewrite_urls import rewrite_mirror_body
+
+
+def strip_wayback_artifacts(body: bytes) -> bytes:
+    return rewrite_mirror_body(body)
 
 
 def _curl_env() -> dict[str, str]:
@@ -36,7 +37,11 @@ def curl_download(url: str, dest: Path, timeout: int) -> bool:
         "-A",
         USER_AGENT,
         "-H",
-        f"Referer: {UPSTREAM_BASE}/",
+        "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "-H",
+        "Accept-Language: en-US,en;q=0.9",
+        "-H",
+        f"Referer: {UPSTREAM_BASE}/pets",
         "-o",
         str(dest),
         url,
@@ -45,7 +50,7 @@ def curl_download(url: str, dest: Path, timeout: int) -> bool:
         subprocess.run(cmd, check=True, env=_curl_env(), capture_output=True)
         if not dest.is_file() or dest.stat().st_size == 0:
             return False
-        if not _looks_valid_asset(dest):
+        if not _looks_valid_download(dest):
             dest.unlink(missing_ok=True)
             return False
         return True
@@ -55,16 +60,29 @@ def curl_download(url: str, dest: Path, timeout: int) -> bool:
         return False
 
 
-def _looks_valid_asset(dest: Path) -> bool:
-    """Reject HTML error pages saved when upstream blocks or redirects."""
+def _looks_valid_download(dest: Path) -> bool:
+    """Reject ModSecurity/HTML error bodies saved as pages or images."""
     size = dest.stat().st_size
     if size < 80:
         return False
-    head = dest.read_bytes()[:512]
+    head = dest.read_bytes()[:1024]
     lower = head.lstrip().lower()
-    if lower.startswith(b"<!doctype") or lower.startswith(b"<html") or lower.startswith(b"<"):
-        return False
     suffix = dest.suffix.lower()
+    name = dest.name.lower()
+
+    if b"not acceptable" in lower or b"mod_security" in lower:
+        return False
+
+    is_html = suffix in (".html", ".htm", ".php") or name == "index.html"
+    if is_html:
+        return b"<html" in lower or b"<!doctype" in lower
+
+    # Binary assets must not be HTML error pages.
+    if lower.startswith(b"<!doctype") or lower.startswith(b"<html") or (
+        lower.startswith(b"<") and not lower.startswith(b"<svg")
+    ):
+        return False
+
     if suffix == ".png":
         return head[:4] == b"\x89PNG"
     if suffix in (".jpg", ".jpeg"):
@@ -75,19 +93,13 @@ def _looks_valid_asset(dest: Path) -> bool:
         return head[:4] == b"RIFF" and b"WEBP" in head[8:16]
     if suffix == ".ico":
         return head[:4] in (b"\x00\x00\x01\x00", b"\x89PNG")
-    if suffix in (".css", ".js"):
-        return True
-    if suffix in (".woff", ".woff2", ".ttf", ".eot", ".svg"):
+    if suffix in (".css", ".js", ".woff", ".woff2", ".ttf", ".eot", ".svg"):
         return True
     return True
 
 
-def strip_wayback_artifacts(body: bytes) -> bytes:
-    text = body.decode("utf-8", errors="replace")
-    text = WAYBACK_PREFIX.sub("/", text)
-    text = text.replace("<!-- BEGIN WAYBACK TOOLBAR INSERT -->", "")
-    text = text.replace("<!-- END WAYBACK TOOLBAR INSERT -->", "")
-    return text.encode("utf-8")
+def _looks_valid_asset(dest: Path) -> bool:
+    return _looks_valid_download(dest)
 
 
 def fetch_to_file(

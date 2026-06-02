@@ -167,22 +167,28 @@ Re-running `./backup.sh` skips files that are already on disk and only fetches m
 - **Filter variants** linked from the pet list (group, family, mount, mutation, etc.)
 - **`/pet/Name`** — individual pet detail pages (including names with spaces, stored as `Name+With+Spaces`)
 - **`/specials`** and **`/special/Name`** — ability list and detail (train ranks, effects)
+- **`/creatures`** — creature browser (index, A–Z letters, filters)
+- **`/creature/Name`** — creature detail pages (linked from the creature browser)
 - **`/creatures?specials=N-R`** — where to acquire abilities (linked from special pages)
+- **Tools** — `/research`, `/planner`, `/spots`, `/lyase`, `/known`, `/sheet`, `/exp`, `/statcalc`, `/hydro`, `/oekevo`, `/family`, `/unknown`, `/about`
 - **`/templates/`** — site CSS and layout images
-- **`/images/`** — icons, pet thumbnails, uploads referenced from pet pages
+- **`/images/`** — icons, pet thumbnails, uploads referenced from mirrored pages
 - **`/favicon.ico`**
 
-**Offline search:** The pet list and specials search boxes use POST on the live site. The local server converts those to GET URLs (e.g. `POST /pets` with ability filter → `GET /pets?specials=3`).
+**Offline search:** POST search forms on `/pets`, `/special`, and `/creatures` are converted to GET URLs the mirror can serve.
+
+Run **`./backfill-nav.sh`** after `./backup.sh` to add Creatures + Tools nav pages. Run **`./backfill-assets.sh`** for creature thumbnails and ranked ability icons.
 
 Links inside saved HTML are rewritten so navigation stays on `http://127.0.0.1:8765`.
 
 ### Not included
 
-These appear in the site navigation but are **outside the pets backup scope**:
+These appear in the site navigation but are **not mirrored**:
 
-- Full `/creatures` browser (only acquire lists linked from specials are mirrored)
-- `/research`, `/planner`, `/wiki/`, etc.
-- Login (`/login.php`), profiles, forums, external links
+- **Profiles** (`/myprofile`, `/profiles`, …) — requires login
+- **Forum** (`/index.php`, `/search.php`, …)
+- **Wiki / Guides** (`/wiki/…`) — large separate section
+- External links (official forums, PayPal, etc.)
 
 Other unmirrored links show a short page with a link back to `/pets`.
 
@@ -197,6 +203,8 @@ Other unmirrored links show a short page with a link back to `/pets`.
 | `./backup.sh` | Download / refresh offline mirror into `./mirror` |
 | `./backfill-specials.sh` | Add specials, ability filters, and creature acquire pages |
 | `./backfill-assets.sh` | Download creature thumbnails, ranked ability icons, and flags into `./mirror` |
+| `./backfill-nav.sh` | Mirror **Creatures** browser + **Tools** pages (nav menu links) |
+| `./backfill-creatures.sh` | Mirror **/creature/Name** detail pages linked from the creature browser |
 | `./start.sh` | Start local server (offline if `mirror/pets` exists) |
 | `./stop.sh` | Stop server on port 8765 (or `SWGPETS_PORT`) |
 | `./mirror.sh` | Same as `./backup.sh` |
@@ -322,7 +330,7 @@ not only `http://127.0.0.1:8765/`.
 
 | URL | Why |
 |-----|-----|
-| `/creatures`, `/specials`, `/wiki/` | Not part of the pets backup |
+| `/wiki/`, `/index.php` (forum), `/login.php`, profiles | Not mirrored — run `./backfill-nav.sh` for Creatures + Tools |
 | `/login.php` | Not mirrored |
 | A pet name with odd encoding | Server tries `+`, space, and `_` variants; re-run `./backup.sh` if that pet was never downloaded |
 | `/pets?sort1=...&specials=N` after ability search | **Restart the server** after updating code: `./stop.sh && ./start.sh`. The mirror stores filters as `/pets?specials=N` only. Run `./verify-filters.sh` to confirm all 28 abilities resolve. |

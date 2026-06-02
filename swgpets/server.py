@@ -29,10 +29,7 @@ from swgpets.config import (
     USER_AGENT,
 )
 
-REWRITE_HOSTS = re.compile(
-    rb"https?://(?:www\.)?swgpets\.com|//(?:www\.)?swgpets\.com",
-    re.IGNORECASE,
-)
+from swgpets.rewrite_urls import rewrite_mirror_body
 
 STATIC_SUFFIXES = {
     ".png",
@@ -84,7 +81,7 @@ def rewrite_body(body: bytes, content_type: str | None, local_origin: str) -> by
     if "text/html" not in lowered and "text/css" not in lowered and "javascript" not in lowered:
         return body
     origin_bytes = local_origin.encode("ascii")
-    body = REWRITE_HOSTS.sub(origin_bytes, body)
+    body = rewrite_mirror_body(body, local_origin=origin_bytes)
     if "text/html" in lowered and b"search_specials[]" in body:
         # Single-select offline: avoids multi-select sending many ?specials= ids.
         body = body.replace(b"search_specials[]' MULTIPLE", b"search_specials[]'")
@@ -118,7 +115,8 @@ def serve_mirror_404(handler: BaseHTTPRequestHandler, path: str, query: str = ""
 <html><head><title>Not in offline backup</title></head>
 <body>
 <h1>Not in offline backup</h1>
-<p><code>{display}</code> was not mirrored. Offline backup includes <strong>/pets</strong>, <strong>/pet/*</strong>, <strong>/special*</strong>, and creature acquire lists linked from specials.</p>
+<p><code>{display}</code> was not mirrored. Offline backup includes <strong>/pets</strong>, <strong>/pet/*</strong>, <strong>/creatures</strong>, <strong>/special*</strong>, Tools pages, and creature acquire lists.</p>
+<p>Run <code>./backfill-nav.sh</code> for Creatures + Tools, or <code>./backfill-specials.sh</code> for ability acquire lists.</p>
 <p><a href="/pets">Go to Pet List</a></p>
 </body></html>"""
     payload = message.encode("utf-8")
@@ -291,7 +289,7 @@ class SwgPetsHandler(BaseHTTPRequestHandler):
     def _mirror_post_redirect(self) -> bool:
         """Handle search forms: POST /pets or POST /special -> GET mirror page."""
         path, _ = request_path_query(self.path)
-        if path not in ("/pets", "/special"):
+        if path not in ("/pets", "/special", "/creatures"):
             return False
         fields = parse_post_fields(self)
         target = redirect_path_for_post(path, fields)

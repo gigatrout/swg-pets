@@ -151,6 +151,23 @@ def special_search_query(fields: dict[str, list[str]]) -> str:
     return urllib.parse.urlencode(params)
 
 
+def creatures_search_query(path: str, fields: dict[str, list[str]]) -> str:
+    """Build GET query for /creatures from POST body + action URL query."""
+    _, _, existing = path.partition("?")
+    params: list[tuple[str, str]] = list(
+        urllib.parse.parse_qsl(existing, keep_blank_values=True)
+    )
+    seen = {key for key, _ in params}
+    skip = {"sort1", "sort2", "show"}
+    for key, values in fields.items():
+        if key in skip or not values or not values[0] or values[0] == "Any":
+            continue
+        if key not in seen:
+            params.append((key, values[0]))
+            seen.add(key)
+    return urllib.parse.urlencode(params)
+
+
 def redirect_path_for_post(path: str, fields: dict[str, list[str]]) -> str | None:
     """Return local redirect path (with query) for a POST, or None if unsupported."""
     base = path.split("?", 1)[0]
@@ -160,4 +177,7 @@ def redirect_path_for_post(path: str, fields: dict[str, list[str]]) -> str | Non
     if base == "/special":
         query = special_search_query(fields)
         return f"/special?{query}" if query else "/special"
+    if base == "/creatures":
+        query = creatures_search_query(path, fields)
+        return f"/creatures?{query}" if query else "/creatures"
     return None
