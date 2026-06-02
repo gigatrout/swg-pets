@@ -31,9 +31,15 @@ ASSET_EXTENSIONS = {
     ".eot",
 }
 
-PAGE_PREFIXES = ("/pets", "/pet/")
+PAGE_PREFIXES = ("/pets", "/pet/", "/specials", "/special")
 ASSET_PREFIXES = ("/templates/", "/images/")
-SPECIAL_PATHS = {"/favicon.ico"}
+SPECIAL_PATHS = {"/favicon.ico", "/special", "/specials"}
+
+# Beastmaster special ability IDs (pet search dropdown).
+SPECIAL_IDS = (
+    "1", "2", "3", "4", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16",
+    "17", "18", "19", "20", "21", "22", "25", "26", "28", "29", "31", "32", "33",
+)
 
 REWRITE_HOSTS = re.compile(
     rb"https?://(?:www\.)?swgpets\.com|//(?:www\.)?swgpets\.com",
@@ -63,11 +69,15 @@ def is_asset_path(path: str) -> bool:
 
 def in_scope(path: str) -> bool:
     base = path.split("?", 1)[0]
+    query = path.split("?", 1)[1] if "?" in path else ""
     if base in SPECIAL_PATHS:
         return True
     if any(base.startswith(prefix) for prefix in PAGE_PREFIXES):
         return True
     if any(base.startswith(prefix) for prefix in ASSET_PREFIXES):
+        return True
+    # Creature lists linked from special pages ("where to acquire").
+    if base.startswith("/creatures") and "specials=" in query:
         return True
     return False
 
@@ -172,10 +182,75 @@ def extract_css_urls(css: str, base_path: str) -> set[str]:
     return found
 
 
+def collect_asset_links(root: Path) -> set[str]:
+    """Return site paths (/images/...) for assets referenced in mirrored HTML/CSS."""
+    found: set[str] = set()
+    for html_file in root.rglob("index.html"):
+        rel = html_file.relative_to(root)
+        base_path = "/" + str(rel.parent).replace("\\", "/")
+        text = html_file.read_text(encoding="utf-8", errors="replace")
+        for link in extract_links(text, base_path):
+            path_only = link.split("?", 1)[0]
+            if is_asset_path(path_only):
+                found.add(path_only)
+
+    for css_file in root.rglob("*.css"):
+        rel = "/" + str(css_file.relative_to(root))
+        css = css_file.read_text(encoding="utf-8", errors="replace")
+        for link in extract_css_urls(css, rel):
+            path_only = link.split("?", 1)[0]
+            if is_asset_path(path_only):
+                found.add(path_only)
+    return found
+
+
+def download_missing_assets(
+    root: Path,
+    *,
+    prefer: str = "auto",
+    delay: float = 0.25,
+    live_timeout: int = 30,
+    wb_timeout: int = 120,
+    links: set[str] | None = None,
+    limit: int | None = None,
+) -> tuple[int, int]:
+    """Download assets referenced in the mirror that are not yet on disk."""
+    pending = sorted(links if links is not None else collect_asset_links(root))
+    saved = 0
+    missed = 0
+    for path in pending:
+        if limit is not None and saved >= limit:
+            break
+        dest = mirror_dest(path, root)
+        if dest.is_file() and dest.stat().st_size > 0:
+            continue
+        source = fetch_to_file(
+            path,
+            dest,
+            live_timeout=live_timeout,
+            wb_timeout=wb_timeout,
+            prefer=prefer,
+        )
+        if source:
+            if dest.suffix.lower() == ".css":
+                dest.write_bytes(rewrite_body(dest.read_bytes()))
+            saved += 1
+            print(f"[asset {saved}] [{source}] {path}")
+        else:
+            missed += 1
+            print(f"[miss] {path}")
+        time.sleep(delay)
+    return saved, missed
+
+
 def seed_paths() -> list[str]:
-    seeds = ["/pets", "/favicon.ico"]
+    seeds = ["/pets", "/specials", "/special", "/favicon.ico"]
     for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
         seeds.append(f"/pets?letter={letter}")
+    for letter in "BCDEFHKPRSTW":
+        seeds.append(f"/special?letter={letter}")
+    for sid in SPECIAL_IDS:
+        seeds.append(f"/pets?specials={sid}")
     return seeds
 
 
@@ -252,24 +327,8 @@ def backup_site(
         time.sleep(delay)
 
     # Second pass: prefetch assets referenced in saved HTML/CSS.
-    asset_queue: deque[str] = deque()
+    asset_queue: deque[str] = deque(collect_asset_links(root))
     asset_seen: set[str] = set()
-    for html_file in root.rglob("index.html"):
-        rel = html_file.relative_to(root)
-        base_path = "/" + str(rel.parent).replace("index.html", "").rstrip("/")
-        text = html_file.read_text(encoding="utf-8", errors="replace")
-        for link in extract_links(text, base_path):
-            if is_asset_path(link.split("?", 1)[0]):
-                asset_queue.append(link)
-        css_path = html_file.with_suffix(".css")
-        if css_path.is_file():
-            for link in extract_css_urls(css_path.read_text(encoding="utf-8", errors="replace"), base_path):
-                asset_queue.append(link)
-
-    for css_file in root.rglob("*.css"):
-        rel = "/" + str(css_file.relative_to(root))
-        for link in extract_css_urls(css_file.read_text(encoding="utf-8", errors="replace"), rel):
-            asset_queue.append(link)
 
     while asset_queue:
         path_query = asset_queue.popleft()

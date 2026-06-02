@@ -54,7 +54,7 @@ Network is only required for `./backup.sh`, not for `./start.sh` in offline mode
 ```bash
 cd ~/git/swgPets
 
-chmod +x backup.sh start.sh stop.sh mirror.sh
+chmod +x backup.sh backfill-specials.sh start.sh stop.sh mirror.sh
 
 ./backup.sh
 ```
@@ -163,11 +163,16 @@ Re-running `./backup.sh` skips files that are already on disk and only fetches m
 
 - **`/pets`** — main pet list
 - **`/pets?letter=A` … `Z`** — alphabetical listings
+- **`/pets?specials=N`** — pets filtered by ability (e.g. Damage Poison)
 - **Filter variants** linked from the pet list (group, family, mount, mutation, etc.)
 - **`/pet/Name`** — individual pet detail pages (including names with spaces, stored as `Name+With+Spaces`)
+- **`/specials`** and **`/special/Name`** — ability list and detail (train ranks, effects)
+- **`/creatures?specials=N-R`** — where to acquire abilities (linked from special pages)
 - **`/templates/`** — site CSS and layout images
 - **`/images/`** — icons, pet thumbnails, uploads referenced from pet pages
 - **`/favicon.ico`**
+
+**Offline search:** The pet list and specials search boxes use POST on the live site. The local server converts those to GET URLs (e.g. `POST /pets` with ability filter → `GET /pets?specials=3`).
 
 Links inside saved HTML are rewritten so navigation stays on `http://127.0.0.1:8765`.
 
@@ -175,11 +180,11 @@ Links inside saved HTML are rewritten so navigation stays on `http://127.0.0.1:8
 
 These appear in the site navigation but are **outside the pets backup scope**:
 
-- `/creatures`, `/specials`, `/research`, `/planner`, `/wiki/`, etc.
+- Full `/creatures` browser (only acquire lists linked from specials are mirrored)
+- `/research`, `/planner`, `/wiki/`, etc.
 - Login (`/login.php`), profiles, forums, external links
-- Live PHP search and any server-side forms
 
-Clicking those in offline mode shows a short HTML page explaining the section was not mirrored, with a link back to `/pets`.
+Other unmirrored links show a short page with a link back to `/pets`.
 
 ---
 
@@ -190,6 +195,8 @@ Clicking those in offline mode shows a short HTML page explaining the section wa
 | Command | Description |
 |---------|-------------|
 | `./backup.sh` | Download / refresh offline mirror into `./mirror` |
+| `./backfill-specials.sh` | Add specials, ability filters, and creature acquire pages |
+| `./backfill-assets.sh` | Download creature thumbnails, ranked ability icons, and flags into `./mirror` |
 | `./start.sh` | Start local server (offline if `mirror/pets` exists) |
 | `./stop.sh` | Stop server on port 8765 (or `SWGPETS_PORT`) |
 | `./mirror.sh` | Same as `./backup.sh` |
@@ -318,8 +325,32 @@ not only `http://127.0.0.1:8765/`.
 | `/creatures`, `/specials`, `/wiki/` | Not part of the pets backup |
 | `/login.php` | Not mirrored |
 | A pet name with odd encoding | Server tries `+`, space, and `_` variants; re-run `./backup.sh` if that pet was never downloaded |
+| `/pets?sort1=...&specials=N` after ability search | **Restart the server** after updating code: `./stop.sh && ./start.sh`. The mirror stores filters as `/pets?specials=N` only. Run `./verify-filters.sh` to confirm all 28 abilities resolve. |
 
-### Server won’t start — “Address already in use”
+### Ability search shows “Not in offline backup” for Charge (or other abilities)
+
+The filtered page **is** on disk (`mirror/pets/specials_N/`). The search form sends extra sort/show parameters; the server maps those to the mirrored filter URL.
+
+1. Restart so you pick up the latest server code:
+
+```bash
+./stop.sh && ./start.sh
+```
+
+2. Verify every ability filter is present:
+
+```bash
+./verify-filters.sh
+```
+
+3. If any are missing, refresh from the live site:
+
+```bash
+./refresh-filters.sh
+```
+
+Some abilities (Provoke, Deflective Hide, Paralytic Poison, Preparation, Resource Scavenger) have **few pets** — their pages are much smaller than Charge but still valid.
+
 
 ```bash
 ./stop.sh
@@ -348,7 +379,23 @@ Re-run a full backup:
 ./backup.sh
 ```
 
+Creature acquire pages (`/creatures?specials=N-R`) often load **without icons** until assets are backfilled:
+
+```bash
+./backfill-assets.sh
+```
+
 Then restart the server.
+
+### Creature acquire page has no creature thumbnails or ability icons
+
+The HTML was mirrored but images under `/images/swgpets/` and ranked icons like `bm_defensive5.png` were not. Run:
+
+```bash
+./backfill-assets.sh
+```
+
+This scans all mirrored HTML and downloads missing PNG/CSS/JS into `./mirror/images/`.
 
 ### Am I hitting the live site or my disk?
 

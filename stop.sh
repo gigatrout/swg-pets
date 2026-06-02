@@ -24,6 +24,14 @@ sleep 0.5
 pids=$(lsof -ti "tcp:${PORT}" -sTCP:LISTEN 2>/dev/null || true)
 if [[ -n "${pids}" ]]; then
   kill -9 ${pids} 2>/dev/null || true
+  sleep 0.5
+fi
+
+# Fallback: stop swgpets.server even if lsof missed it.
+if pgrep -f "swgpets\\.server" >/dev/null 2>&1; then
+  pkill -f "swgpets\\.server" 2>/dev/null || true
+  sleep 0.5
+  pkill -9 -f "swgpets\\.server" 2>/dev/null || true
 fi
 
 if lsof -ti "tcp:${PORT}" -sTCP:LISTEN >/dev/null 2>&1; then

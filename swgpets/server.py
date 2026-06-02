@@ -17,6 +17,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from swgpets.backup import mirror_dest, query_slug
+from swgpets.offline_forms import parse_post_fields, pets_query_fallbacks, redirect_path_for_post
 from swgpets.config import (
     CACHE_DIR,
     DEFAULT_HOST,
@@ -83,7 +84,13 @@ def rewrite_body(body: bytes, content_type: str | None, local_origin: str) -> by
     if "text/html" not in lowered and "text/css" not in lowered and "javascript" not in lowered:
         return body
     origin_bytes = local_origin.encode("ascii")
-    return REWRITE_HOSTS.sub(origin_bytes, body)
+    body = REWRITE_HOSTS.sub(origin_bytes, body)
+    if "text/html" in lowered and b"search_specials[]" in body:
+        # Single-select offline: avoids multi-select sending many ?specials= ids.
+        body = body.replace(b"search_specials[]' MULTIPLE", b"search_specials[]'")
+        body = body.replace(b'search_specials[]" MULTIPLE', b'search_specials[]"')
+        body = body.replace(b"search_bonus[]' MULTIPLE", b"search_bonus[]'")
+    return body
 
 
 def path_variants(path: str) -> list[str]:
@@ -105,12 +112,13 @@ def request_path_query(raw_path: str) -> tuple[str, str]:
     return urllib.parse.unquote(parsed.path or "/"), parsed.query
 
 
-def serve_mirror_404(handler: BaseHTTPRequestHandler, path: str) -> None:
+def serve_mirror_404(handler: BaseHTTPRequestHandler, path: str, query: str = "") -> None:
+    display = path + (f"?{query}" if query else "")
     message = f"""<!DOCTYPE html>
 <html><head><title>Not in offline backup</title></head>
 <body>
 <h1>Not in offline backup</h1>
-<p><code>{path}</code> was not mirrored. This backup covers <strong>/pets</strong> and <strong>/pet/*</strong> only.</p>
+<p><code>{display}</code> was not mirrored. Offline backup includes <strong>/pets</strong>, <strong>/pet/*</strong>, <strong>/special*</strong>, and creature acquire lists linked from specials.</p>
 <p><a href="/pets">Go to Pet List</a></p>
 </body></html>"""
     payload = message.encode("utf-8")
@@ -182,6 +190,15 @@ class SwgPetsHandler(BaseHTTPRequestHandler):
             ]
 
         candidates: list[Path] = []
+
+        # Try simplified /pets filter URLs first (mirrored as pets/specials_N/).
+        if path.rstrip("/") == "/pets" and query:
+            for simpler in pets_query_fallbacks(query):
+                candidates.append(mirror_dest(f"/pets?{simpler}", self.mirror_dir))
+                candidates.append(
+                    self.mirror_dir / "pets" / query_slug(simpler) / "index.html"
+                )
+
         for variant in path_variants(path):
             path_query = variant + (f"?{query}" if query else "")
             candidates.append(mirror_dest(path_query, self.mirror_dir))
@@ -194,13 +211,34 @@ class SwgPetsHandler(BaseHTTPRequestHandler):
                 segments = [s for s in rel.split("/") if s]
                 if segments:
                     candidates.append(self.mirror_dir.joinpath(*segments, slug, "index.html"))
-            candidates.extend(
-                [
-                    self.mirror_dir / rel,
-                    self.mirror_dir / f"{rel}.html",
-                    self.mirror_dir / rel / "index.html",
-                ]
-            )
+            else:
+                candidates.extend(
+                    [
+                        self.mirror_dir / rel,
+                        self.mirror_dir / f"{rel}.html",
+                        self.mirror_dir / rel / "index.html",
+                    ]
+                )
+
+        # /creatures?specials=3-1 (acquire lists from special detail pages)
+        if path.startswith("/creatures") and query:
+            for variant in path_variants(path):
+                path_query = variant + f"?{query}"
+                candidates.append(mirror_dest(path_query, self.mirror_dir))
+                slug = query_slug(query)
+                segments = [s for s in variant.lstrip("/").split("/") if s]
+                if segments:
+                    candidates.append(self.mirror_dir.joinpath(*segments, slug, "index.html"))
+
+        # /special/Damage+Poison (icon links) vs /special?name=Damage+Poison (perm links)
+        if path.startswith("/special/") and not query:
+            name = path[len("/special/") :].strip("/")
+            if name:
+                for variant in path_variants(name):
+                    candidates.append(self.mirror_dir / "special" / variant / "index.html")
+                candidates.append(
+                    self.mirror_dir / "special" / query_slug(f"name={name}") / "index.html"
+                )
 
         seen: set[Path] = set()
         unique: list[Path] = []
@@ -224,13 +262,60 @@ class SwgPetsHandler(BaseHTTPRequestHandler):
         cached = cache_path(self._upstream_url(), self.cache_dir)
         return serve_local_file(cached, self, local_origin=self.local_origin)
 
+    def _canonical_pets_redirect(self) -> bool:
+        """Redirect /pets?sort1=...&specials=N to /pets?specials=N when mirrored."""
+        path, query = request_path_query(self.path)
+        if path.rstrip("/") != "/pets" or not query:
+            return False
+        fallbacks = pets_query_fallbacks(query)
+        if not fallbacks:
+            return False
+        canonical = fallbacks[-1] if len(fallbacks) == 1 else fallbacks[0]
+        # Prefer specials-only URL when an ability filter is present.
+        parsed = urllib.parse.parse_qs(query, keep_blank_values=True)
+        if parsed.get("specials"):
+            canonical = f"specials={parsed['specials'][-1]}"
+            if parsed.get("bonus"):
+                canonical += f"&bonus={parsed['bonus'][-1]}"
+        if canonical == query:
+            return False
+        dest = mirror_dest(f"/pets?{canonical}", self.mirror_dir)
+        if not dest.is_file():
+            return False
+        print(f"GET {path}?{query} -> /pets?{canonical}")
+        self.send_response(302, "Found")
+        self.send_header("Location", f"/pets?{canonical}")
+        self.end_headers()
+        return True
+
+    def _mirror_post_redirect(self) -> bool:
+        """Handle search forms: POST /pets or POST /special -> GET mirror page."""
+        path, _ = request_path_query(self.path)
+        if path not in ("/pets", "/special"):
+            return False
+        fields = parse_post_fields(self)
+        target = redirect_path_for_post(path, fields)
+        if not target:
+            return False
+        print(f"POST {path} -> GET {target}")
+        self.send_response(302, "Found")
+        self.send_header("Location", target)
+        self.end_headers()
+        return True
+
     def _proxy(self, method: str) -> None:
+        if method == "POST" and self.prefer_mirror and self._mirror_post_redirect():
+            return
+
+        if method == "GET" and self.prefer_mirror and self._canonical_pets_redirect():
+            return
+
         if self._try_mirror():
             return
 
         if self.prefer_mirror:
-            path, _ = request_path_query(self.path)
-            serve_mirror_404(self, path)
+            path, query = request_path_query(self.path)
+            serve_mirror_404(self, path, query)
             return
 
         url = self._upstream_url()
