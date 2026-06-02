@@ -1,0 +1,1 @@
+# SWG Pets local server uses Python 3 stdlib only.
