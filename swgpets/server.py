@@ -17,7 +17,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from swgpets.backup import mirror_dest, query_slug
-from swgpets.offline_forms import parse_post_fields, pets_query_fallbacks, redirect_path_for_post
+from swgpets.offline_forms import (
+    parse_post_fields,
+    pets_canonical_filter_query,
+    pets_query_fallbacks,
+    redirect_path_for_post,
+)
+from swgpets.pets_name_search import build_pets_name_search_page, pets_name_search_term
 from swgpets.config import (
     CACHE_DIR,
     DEFAULT_HOST,
@@ -261,29 +267,62 @@ class SwgPetsHandler(BaseHTTPRequestHandler):
         return serve_local_file(cached, self, local_origin=self.local_origin)
 
     def _canonical_pets_redirect(self) -> bool:
-        """Redirect /pets?sort1=...&specials=N to /pets?specials=N when mirrored."""
+        """Redirect /pets?sort1=...&search_name=Wing to filter-only URL when possible."""
         path, query = request_path_query(self.path)
         if path.rstrip("/") != "/pets" or not query:
             return False
-        fallbacks = pets_query_fallbacks(query)
-        if not fallbacks:
+
+        canonical = pets_canonical_filter_query(query)
+        if not canonical:
+            fallbacks = pets_query_fallbacks(query)
+            if not fallbacks:
+                return False
+            canonical = fallbacks[-1] if len(fallbacks) == 1 else fallbacks[0]
+            parsed = urllib.parse.parse_qs(query, keep_blank_values=True)
+            if parsed.get("specials"):
+                canonical = f"specials={parsed['specials'][-1]}"
+                if parsed.get("bonus"):
+                    canonical += f"&bonus={parsed['bonus'][-1]}"
+            if canonical == query:
+                return False
+
+        if pets_name_search_term(canonical):
+            location = f"/pets?{canonical}"
+        else:
+            dest = mirror_dest(f"/pets?{canonical}", self.mirror_dir)
+            if not dest.is_file():
+                return False
+            location = f"/pets?{canonical}"
+
+        if location == self.path or location == f"{path}?{query}":
             return False
-        canonical = fallbacks[-1] if len(fallbacks) == 1 else fallbacks[0]
-        # Prefer specials-only URL when an ability filter is present.
-        parsed = urllib.parse.parse_qs(query, keep_blank_values=True)
-        if parsed.get("specials"):
-            canonical = f"specials={parsed['specials'][-1]}"
-            if parsed.get("bonus"):
-                canonical += f"&bonus={parsed['bonus'][-1]}"
-        if canonical == query:
-            return False
-        dest = mirror_dest(f"/pets?{canonical}", self.mirror_dir)
-        if not dest.is_file():
-            return False
-        print(f"GET {path}?{query} -> /pets?{canonical}")
+
+        print(f"GET {path}?{query} -> {location}")
         self.send_response(302, "Found")
-        self.send_header("Location", f"/pets?{canonical}")
+        self.send_header("Location", location)
         self.end_headers()
+        return True
+
+    def _pets_name_search_response(self) -> bool:
+        """Serve /pets?search_name=... filtered locally by pet name substring."""
+        path, query = request_path_query(self.path)
+        if path.rstrip("/") != "/pets" or not query:
+            return False
+        term = pets_name_search_term(query)
+        if not term:
+            return False
+
+        body = build_pets_name_search_page(term, self.mirror_dir)
+        if body is None:
+            return False
+
+        body = rewrite_body(body, "text/html; charset=utf-8", self.local_origin)
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+        print(f"GET /pets?search_name={term!r} -> {len(body)} bytes (local name filter)")
         return True
 
     def _mirror_post_redirect(self) -> bool:
@@ -306,6 +345,9 @@ class SwgPetsHandler(BaseHTTPRequestHandler):
             return
 
         if method == "GET" and self.prefer_mirror and self._canonical_pets_redirect():
+            return
+
+        if method == "GET" and self.prefer_mirror and self._pets_name_search_response():
             return
 
         if self._try_mirror():

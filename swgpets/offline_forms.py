@@ -91,21 +91,62 @@ def _first(fields: dict[str, list[str]], *keys: str) -> str | None:
     return None
 
 
-def pets_search_query(fields: dict[str, list[str]]) -> str:
-    """Build GET query for /pets — only filter keys we mirror offline."""
+# POST form field -> GET query param (matches swgpets.com URL shape).
+PET_SEARCH_FIELD_TO_PARAM: dict[str, str] = {
+    "search_name": "search_name",
+    "search_family": "family",
+    "search_group": "group",
+    "search_obtain": "obtain",
+    "search_planet": "planet",
+    "search_supplement": "supplement",
+    "search_mission": "mission",
+    "search_mount": "mount",
+    "search_flying": "flying",
+    "search_added": "added",
+    "search_type": "type",
+    "search_lyase": "lyase",
+    "search_colors": "colors",
+    "search_frog": "frog",
+}
+
+PET_QUERY_DISPLAY_KEYS = frozenset({"sort1", "sort2", "show", "page"})
+
+
+def _pets_filter_params(parsed: dict[str, list[str]]) -> list[tuple[str, str]]:
     params: list[tuple[str, str]] = []
+    for key in sorted(parsed):
+        if key in PET_QUERY_DISPLAY_KEYS:
+            continue
+        for value in parsed[key]:
+            if value:
+                params.append((key, value))
+    return params
+
+
+def pets_search_query(fields: dict[str, list[str]]) -> str:
+    """Build GET query for /pets — filter keys used by the offline mirror."""
+    params: list[tuple[str, str]] = []
+    seen: set[str] = set()
 
     special_ids: list[str] = []
     for key in ("search_specials[]", "search_specials"):
         special_ids.extend(v for v in fields.get(key, []) if v and v != "Any")
     if special_ids:
         params.append(("specials", special_ids[-1]))
+        seen.add("specials")
 
     bonus_ids: list[str] = []
     for key in ("search_bonus[]", "search_bonus"):
         bonus_ids.extend(v for v in fields.get(key, []) if v)
     if bonus_ids:
         params.append(("bonus", bonus_ids[-1]))
+        seen.add("bonus")
+
+    for field, param in PET_SEARCH_FIELD_TO_PARAM.items():
+        value = _first(fields, field)
+        if value and value != "Any" and param not in seen:
+            params.append((param, value))
+            seen.add(param)
 
     # sort1/sort2/show are not mirrored as separate pages; omit them.
     return urllib.parse.urlencode(params)
@@ -115,15 +156,39 @@ def pets_query_fallbacks(query: str) -> list[str]:
     """Simpler /pets query strings to try when the full URL is not mirrored."""
     parsed = urllib.parse.parse_qs(query, keep_blank_values=True)
     fallbacks: list[str] = []
+
+    filter_query = urllib.parse.urlencode(_pets_filter_params(parsed))
+    if filter_query:
+        fallbacks.append(filter_query)
+
     specials = parsed.get("specials", [])
     bonuses = parsed.get("bonus", [])
     if specials:
-        fallbacks.append(f"specials={specials[-1]}")
+        simplified = f"specials={specials[-1]}"
+        if simplified not in fallbacks:
+            fallbacks.append(simplified)
     if bonuses:
-        fallbacks.append(f"bonus={bonuses[-1]}")
+        simplified = f"bonus={bonuses[-1]}"
+        if simplified not in fallbacks:
+            fallbacks.append(simplified)
     if specials and bonuses:
-        fallbacks.insert(0, f"specials={specials[-1]}&bonus={bonuses[-1]}")
+        combined = f"specials={specials[-1]}&bonus={bonuses[-1]}"
+        if combined not in fallbacks:
+            fallbacks.insert(0, combined)
     return fallbacks
+
+
+def pets_canonical_filter_query(query: str) -> str | None:
+    """Drop sort/show/page params; return filter-only query when it differs."""
+    parsed = urllib.parse.parse_qs(query, keep_blank_values=True)
+    if not parsed:
+        return None
+    if not any(key in parsed for key in PET_QUERY_DISPLAY_KEYS):
+        return None
+    canonical = urllib.parse.urlencode(_pets_filter_params(parsed))
+    if not canonical or canonical == query:
+        return None
+    return canonical
 
 
 def special_search_query(fields: dict[str, list[str]]) -> str:
